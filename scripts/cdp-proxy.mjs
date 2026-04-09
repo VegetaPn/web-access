@@ -16,6 +16,35 @@ let cmdId = 0;
 const pending = new Map(); // id -> {resolve, timer}
 const sessions = new Map(); // targetId -> sessionId
 
+// --- 自动重连 ---
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const RECONNECT_BASE_DELAY = 2000; // 2s，指数退避到 30s 封顶
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+    console.error(`[CDP Proxy] 已重试 ${MAX_RECONNECT_ATTEMPTS} 次，停止自动重连（等待下次 API 请求触发）`);
+    reconnectAttempt = 0;
+    return;
+  }
+  const delay = Math.min(RECONNECT_BASE_DELAY * Math.pow(1.5, reconnectAttempt), 30000);
+  reconnectAttempt++;
+  console.log(`[CDP Proxy] ${Math.round(delay / 1000)}s 后尝试重连 (第 ${reconnectAttempt} 次)...`);
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await connect();
+      reconnectAttempt = 0;
+      console.log('[CDP Proxy] 重连成功');
+    } catch (e) {
+      console.error('[CDP Proxy] 重连失败:', e.message);
+      scheduleReconnect();
+    }
+  }, delay);
+}
+
 // --- WebSocket 兼容层 ---
 let WS;
 if (typeof globalThis.WebSocket !== 'undefined') {
@@ -135,13 +164,20 @@ async function connect() {
 
     const onOpen = () => {
       cleanup();
+      reconnectAttempt = 0;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       console.log(`[CDP Proxy] 已连接 Chrome (端口 ${chromePort})`);
       resolve();
     };
+    let didSettle = false; // 防止 error+close 双触发重连
     const onError = (e) => {
       cleanup();
       const msg = e.message || e.error?.message || '连接失败';
       console.error('[CDP Proxy] 连接错误:', msg);
+      ws = null;
+      chromePort = null;
+      chromeWsPath = null;
+      if (!didSettle) { didSettle = true; scheduleReconnect(); }
       reject(new Error(msg));
     };
     const onClose = () => {
@@ -150,6 +186,7 @@ async function connect() {
       chromePort = null; // 重置端口缓存，下次连接重新发现
       chromeWsPath = null;
       sessions.clear();
+      if (!didSettle) { didSettle = true; scheduleReconnect(); }
     };
     const onMessage = (evt) => {
       const data = typeof evt === 'string' ? evt : (evt.data || evt);

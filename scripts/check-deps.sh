@@ -28,17 +28,25 @@ setTimeout(() => process.exit(1), 2000);
 fi
 echo "chrome: ok (port 9222)"
 
-# CDP Proxy — 已运行则跳过，未运行则启动并等待连接
+# CDP Proxy — 已运行且已连接则跳过，否则确保（重）启动并等待连接
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HEALTH=$(curl -s --connect-timeout 2 "http://127.0.0.1:3456/health" 2>/dev/null)
+
 if echo "$HEALTH" | grep -q '"connected":true'; then
   echo "proxy: ready"
 else
-  if ! echo "$HEALTH" | grep -q '"ok"'; then
+  # Proxy 进程存在但未连接 → 杀掉重启（避免僵尸状态死等）
+  if echo "$HEALTH" | grep -q '"ok"'; then
+    echo "proxy: running but not connected, restarting..."
+    pkill -f "cdp-proxy.mjs" 2>/dev/null
+    sleep 1
+  else
     echo "proxy: starting..."
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    node "$SCRIPT_DIR/cdp-proxy.mjs" > /tmp/cdp-proxy.log 2>&1 &
   fi
-  for i in $(seq 1 15); do
+
+  node "$SCRIPT_DIR/cdp-proxy.mjs" > /tmp/cdp-proxy.log 2>&1 &
+
+  for i in $(seq 1 20); do
     sleep 1
     curl -s http://localhost:3456/health | grep -q '"connected":true' && echo "proxy: ready" && exit 0
     [ $i -eq 3 ] && echo "⚠️  Chrome 可能有授权弹窗，请点击「允许」后等待连接..."
